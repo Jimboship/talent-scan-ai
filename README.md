@@ -21,34 +21,30 @@ A SaaS-style resume scanning app built with Next.js 14, TypeScript, Tailwind CSS
 
 ## Local setup
 
-1. Copy `.env.example` to `.env.local` and fill in your Supabase values.
-2. Install dependencies:
+1. Copy `.env.example` to `.env.local` and fill in your Supabase project URL and keys (Settings → API).
+2. In the Supabase dashboard, open **SQL Editor**, paste and run `supabase/schema.sql`. This enables pgvector, creates `resumes`, RLS (including updates for embeddings), the `match_resumes` search function, and a private Storage bucket named `resumes`.
+3. Under **Authentication → URL Configuration**, set the Site URL to `http://localhost:3000` and add `http://localhost:3000/auth/callback` to Redirect URLs.
+4. Install dependencies:
    ```bash
    npm install
    ```
-3. Run the app:
+5. Run the app:
    ```bash
    npm run dev
    ```
-4. Open http://localhost:3000
+6. Open http://localhost:3000
 
 ## Supabase database schema
 
-```sql
-create extension if not exists vector;
+The source of truth is `supabase/schema.sql`. It defines:
 
-create table if not exists resumes (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null,
-  file_name text not null,
-  extracted_text text,
-  embedding vector(1536),
-  created_at timestamptz default now()
-);
-
-create index if not exists resumes_user_id_idx on resumes(user_id);
-```
+- `vector` extension
+- `resumes` (`id`, `user_id` → `auth.users`, `file_name`, `extracted_text`, `embedding vector(1536)`, `created_at`)
+- HNSW cosine index on `embedding`
+- Row Level Security so users only read/insert/update/delete their own rows
+- `match_resumes(query_embedding, match_count)` — top 10 cosine matches for `auth.uid()`
+- Private Storage bucket `resumes` with per-user folder policies (`{user_id}/...`)
 
 ## Notes
 
-This starter app includes the UI and Supabase client setup. To complete the production-ready workflow, connect your own Supabase project and add your PDF upload, extraction, and semantic search logic.
+Email magic-link auth and PDF upload (Storage + text extraction + 1536-d embeddings) are in place. Wiring search to `match_resumes` is still to be completed. Add `OPENAI_API_KEY` to `.env.local` so uploads can be indexed.

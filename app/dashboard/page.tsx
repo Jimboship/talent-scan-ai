@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { ArrowUpRight, FileText, Search, Sparkles, UploadCloud } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { resumeToCandidate } from "@/lib/resume-profile";
 import { createClient } from "@/lib/supabase";
 
 type Candidate = {
@@ -13,30 +14,6 @@ type Candidate = {
   experience: string;
   uploadedAt: string;
 };
-
-const initialCandidates: Candidate[] = [
-  {
-    id: 1,
-    name: "Aisha Carter",
-    skills: ["React", "TypeScript", "Fintech"],
-    experience: "6 years",
-    uploadedAt: "2026-09-10"
-  },
-  {
-    id: 2,
-    name: "Mateo Ruiz",
-    skills: ["Node.js", "Postgres", "Payments"],
-    experience: "5 years",
-    uploadedAt: "2026-09-11"
-  },
-  {
-    id: 3,
-    name: "Priya Nair",
-    skills: ["React", "Design Systems", "AI"],
-    experience: "4 years",
-    uploadedAt: "2026-09-09"
-  }
-];
 
 const searchSuggestions = [
   "React dev with fintech experience",
@@ -48,7 +25,7 @@ export default function DashboardPage() {
   const router = useRouter();
   const supabase = createClient();
 
-  const [candidates, setCandidates] = useState<Candidate[]>(initialCandidates);
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [query, setQuery] = useState("Search candidates like: React dev with fintech experience");
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -59,19 +36,12 @@ export default function DashboardPage() {
       try {
         const { data, error: fetchError } = await supabase.from("resumes").select("*").order("created_at", { ascending: false });
 
-        if (fetchError || !data || data.length === 0) {
+        if (fetchError) {
+          setError(fetchError.message);
           return;
         }
 
-        const mapped = data.map((row) => ({
-          id: row.id,
-          name: row.file_name.replace(/\.pdf$/i, ""),
-          skills: row.extracted_text ? row.extracted_text.split(/\s+/).slice(0, 3) : ["Resume"],
-          experience: "Uploaded",
-          uploadedAt: new Date(row.created_at).toISOString().slice(0, 10)
-        }));
-
-        setCandidates((current) => [...mapped, ...current.filter((item) => item.id !== 1 && item.id !== 2 && item.id !== 3)]);
+        setCandidates((data ?? []).map(resumeToCandidate));
       } catch {
         // Ignore missing Supabase setup or empty table.
       }
@@ -97,68 +67,74 @@ export default function DashboardPage() {
       return;
     }
 
-    const incoming = Array.from(files).slice(0, 500);
+    const pdfs = Array.from(files).filter(
+      (file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")
+    );
 
-    if (incoming.length === 0) {
+    if (pdfs.length === 0) {
+      setError("Please upload PDF files only.");
       return;
     }
 
+    const remaining = Math.max(500 - candidates.length, 0);
+    if (remaining === 0) {
+      setError("You have reached the 500 resume limit.");
+      return;
+    }
+
+    const incoming = pdfs.slice(0, remaining);
     setUploading(true);
     setError(null);
 
     try {
-      const {
-        data: { session },
-        error: sessionError
-      } = await supabase.auth.getSession();
-
-      if (sessionError || !session) {
-        router.push("/login");
-        return;
-      }
-
       const uploadedCandidates: Candidate[] = [];
+      const warnings: string[] = [];
 
-      for (const file of incoming) {
-        const safeName = file.name.replace(/\s+/g, "-");
-        const filePath = `${session.user.id}/${Date.now()}-${safeName}`;
-
-        const { error: uploadError } = await supabase.storage.from("resumes").upload(filePath, file, {
-          cacheControl: "3600",
-          upsert: false
-        });
-
-        if (uploadError) {
-          throw uploadError;
+      for (let index = 0; index < incoming.length; index += 10) {
+        const batch = incoming.slice(index, index + 10);
+        const formData = new FormData();
+        for (const file of batch) {
+          formData.append("files", file);
         }
 
-        const { data: inserted, error: insertError } = await supabase
-          .from("resumes")
-          .insert([
-            {
-              user_id: session.user.id,
-              file_name: file.name,
-              extracted_text: file.name.replace(/\.pdf$/i, ""),
-              embedding: null
-            }
-          ])
-          .select()
-          .single();
+        const response = await fetch("/api/upload", {
+          method: "POST",
+          body: formData
+        });
+        const json = (await response.json()) as {
+          candidates?: Candidate[];
+          error?: string;
+          errors?: string[];
+        };
 
-        if (insertError || !inserted) {
-          throw insertError ?? new Error("Unable to save resume metadata.");
+        if (response.status === 401) {
+          router.push("/login");
+          return;
         }
 
-        uploadedCandidates.push({
-          id: inserted.id,
-          name: inserted.file_name.replace(/\.pdf$/i, ""),
-          skills: inserted.extracted_text ? inserted.extracted_text.split(/\s+/).slice(0, 3) : ["Resume"],
-          experience: "Uploaded",
-          uploadedAt: new Date(inserted.created_at).toISOString().slice(0, 10)
-        });
+        if (!response.ok) {
+          throw new Error(json.error ?? "Unable to upload resumes.");
+        }
+
+        uploadedCandidates.push(...(json.candidates ?? []));
+        if (json.errors?.length) {
+          warnings.push(...json.errors);
+        }
       }
 
       setCandidates((current) => [...uploadedCandidates, ...current].slice(0, 500));
+
+      const skippedNonPdf = files.length - pdfs.length;
+      const skippedLimit = pdfs.length - incoming.length;
+      const extra = [
+        skippedNonPdf > 0 ? `${skippedNonPdf} non-PDF file(s) were ignored.` : null,
+        skippedLimit > 0 ? `${skippedLimit} file(s) were skipped because of the 500 resume limit.` : null,
+        ...warnings
+      ].filter(Boolean);
+
+      if (extra.length > 0) {
+        setError(extra.join(" "));
+      }
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Unable to upload resumes.");
     } finally {
@@ -179,7 +155,15 @@ export default function DashboardPage() {
             <p className="text-sm uppercase tracking-[0.2em] text-slate-400">TalentScan AI</p>
             <h1 className="mt-2 text-3xl font-semibold text-white">Dashboard</h1>
           </div>
-          <button className="rounded-xl border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-200 transition hover:border-slate-600">
+          <button
+            type="button"
+            onClick={async () => {
+              await supabase.auth.signOut();
+              router.push("/login");
+              router.refresh();
+            }}
+            className="rounded-xl border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-200 transition hover:border-slate-600"
+          >
             Sign out
           </button>
         </header>
@@ -250,10 +234,14 @@ export default function DashboardPage() {
           >
             <input
               type="file"
-              accept=".pdf"
+              accept=".pdf,application/pdf"
               multiple
-              className="absolute inset-0 cursor-pointer opacity-0"
-              onChange={(event) => void onFilesAdded(event.target.files)}
+              disabled={uploading}
+              className="absolute inset-0 cursor-pointer opacity-0 disabled:cursor-wait"
+              onChange={(event) => {
+                void onFilesAdded(event.target.files);
+                event.target.value = "";
+              }}
             />
 
             <div className="flex flex-col items-center justify-center text-center">
@@ -300,22 +288,30 @@ export default function DashboardPage() {
                 </tr>
               </thead>
               <tbody>
-                {filteredCandidates.map((candidate) => (
-                  <tr key={String(candidate.id)} className="border-t border-slate-800 text-sm text-slate-200">
-                    <td className="px-6 py-4 font-medium text-white">{candidate.name}</td>
-                    <td className="px-6 py-4">
-                      <div className="flex flex-wrap gap-2">
-                        {candidate.skills.map((skill) => (
-                          <span key={`${candidate.id}-${skill}`} className="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300">
-                            {skill}
-                          </span>
-                        ))}
-                      </div>
+                {filteredCandidates.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="px-6 py-10 text-center text-sm text-slate-400">
+                      No resumes yet. Drop PDFs above to extract name, skills, and experience.
                     </td>
-                    <td className="px-6 py-4">{candidate.experience}</td>
-                    <td className="px-6 py-4 text-slate-400">{candidate.uploadedAt}</td>
                   </tr>
-                ))}
+                ) : (
+                  filteredCandidates.map((candidate) => (
+                    <tr key={String(candidate.id)} className="border-t border-slate-800 text-sm text-slate-200">
+                      <td className="px-6 py-4 font-medium text-white">{candidate.name}</td>
+                      <td className="px-6 py-4">
+                        <div className="flex flex-wrap gap-2">
+                          {(candidate.skills.length > 0 ? candidate.skills : ["Not specified"]).map((skill) => (
+                            <span key={`${candidate.id}-${skill}`} className="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300">
+                              {skill}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">{candidate.experience}</td>
+                      <td className="px-6 py-4 text-slate-400">{candidate.uploadedAt}</td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>

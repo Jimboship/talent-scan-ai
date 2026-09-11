@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { ArrowRight, BrainCircuit, ShieldCheck, Sparkles, UploadCloud } from "lucide-react";
 
+import { getSessionUser } from "@/lib/supabase-server";
+
 const features = [
   {
     title: "Upload resumes fast",
@@ -19,7 +21,10 @@ const features = [
   }
 ];
 
-export default function HomePage() {
+export default async function HomePage() {
+  const user = await getSessionUser();
+  const appHref = user ? "/dashboard" : "/login";
+
   return (
     <main className="min-h-screen">
       <header className="mx-auto max-w-7xl px-6 py-6">
@@ -38,7 +43,7 @@ export default function HomePage() {
             <Link href="/login">Login</Link>
           </div>
           <Link
-            href="/dashboard"
+            href={appHref}
             className="rounded-xl border border-primary-500/40 bg-primary-500/10 px-4 py-2 text-sm font-medium text-primary-100 transition hover:bg-primary-500/20"
           >
             Launch app
@@ -62,7 +67,7 @@ export default function HomePage() {
 
             <div className="mt-8 flex flex-col gap-4 sm:flex-row">
               <Link
-                href="/dashboard"
+                href={appHref}
                 className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-3 font-medium text-white transition hover:bg-primary-600"
               >
                 Upload Resumes

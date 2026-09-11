@@ -1,16 +1,29 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { FormEvent, Suspense, useMemo, useState } from "react";
 
+import { safeNextPath } from "@/lib/auth";
 import { createClient } from "@/lib/supabase";
 
-export default function LoginPage() {
-  const router = useRouter();
-  const [email, setEmail] = useState("demo@talentscan.ai");
+function LoginForm() {
+  const searchParams = useSearchParams();
+  const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
+  const [sent, setSent] = useState(false);
   const [message, setMessage] = useState("Enter your email to receive a secure login link.");
+
+  const initialError = searchParams.get("error");
+  const nextPath = safeNextPath(searchParams.get("next"));
+
+  const statusMessage = useMemo(() => {
+    if (initialError && !sent && !loading) {
+      return "The login link was invalid or expired. Request a new one.";
+    }
+
+    return message;
+  }, [initialError, loading, message, sent]);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -19,20 +32,21 @@ export default function LoginPage() {
 
     try {
       const supabase = createClient();
-      const redirectUrl = typeof window !== "undefined" ? `${window.location.origin}/dashboard` : undefined;
+      const redirectUrl = `${window.location.origin}/auth/callback?next=${encodeURIComponent(nextPath)}`;
 
       const { error } = await supabase.auth.signInWithOtp({
         email,
-        options: redirectUrl ? { emailRedirectTo: redirectUrl } : undefined
+        options: { emailRedirectTo: redirectUrl }
       });
 
       if (error) {
         throw error;
       }
 
-      setMessage("Check your inbox for the magic link and then return to continue.");
-      router.push("/dashboard");
+      setSent(true);
+      setMessage("Check your inbox for the magic link. Stay on this page until you open it.");
     } catch (error) {
+      setSent(false);
       setMessage(error instanceof Error ? error.message : "Unable to send login link.");
     } finally {
       setLoading(false);
@@ -62,16 +76,16 @@ export default function LoginPage() {
 
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || sent}
             className="w-full rounded-xl bg-primary-500 px-4 py-3 font-medium text-white transition hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-70"
           >
-            {loading ? "Sending link..." : "Continue with email"}
+            {loading ? "Sending link..." : sent ? "Link sent" : "Continue with email"}
           </button>
         </form>
 
-        {message ? (
+        {statusMessage ? (
           <div className="mt-6 rounded-xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-sm text-slate-300">
-            {message}
+            {statusMessage}
           </div>
         ) : null}
 
@@ -80,5 +94,19 @@ export default function LoginPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="flex min-h-screen items-center justify-center px-6">
+          <div className="card-surface w-full max-w-md p-8 text-center text-slate-300">Loading sign in…</div>
+        </main>
+      }
+    >
+      <LoginForm />
+    </Suspense>
   );
 }
