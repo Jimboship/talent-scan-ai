@@ -1,73 +1,114 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 
+import { createResumeEmbedding, toVectorLiteral } from "@/lib/embeddings";
+import { extractCandidateProfile } from "@/lib/resume-profile";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 
-const fallbackResults = [
-  { name: "Aisha Carter", score: 96, role: "Senior React Engineer" },
-  { name: "Mateo Ruiz", score: 92, role: "Frontend Platform Engineer" },
-  { name: "Priya Nair", score: 89, role: "AI Product Engineer" },
-  { name: "Leo Park", score: 87, role: "Full Stack Developer" },
-  { name: "Nia Brooks", score: 84, role: "Payments Engineer" },
-  { name: "Daniel Kim", score: 82, role: "React Native Engineer" },
-  { name: "Sara Ahmed", score: 80, role: "Engineering Manager" },
-  { name: "Omar Hassan", score: 78, role: "Design Systems Engineer" },
-  { name: "Lena Nguyen", score: 76, role: "Senior Frontend Engineer" },
-  { name: "Noah Wright", score: 74, role: "Product Engineer" }
-];
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
-function calculateScore(query: string, candidateText: string) {
-  const normalizedQuery = query.toLowerCase().trim();
+const MAX_RESULTS = 10;
 
-  if (!normalizedQuery) {
-    return 100;
+const searchBodySchema = z.object({
+  query: z.string().trim().min(1, "Enter a search query.").max(2000, "Search query is too long.")
+});
+
+const matchRowSchema = z.object({
+  id: z.string(),
+  file_name: z.string(),
+  extracted_text: z.string().nullable(),
+  created_at: z.string(),
+  similarity: z.number()
+});
+
+const matchRowsSchema = z.array(matchRowSchema);
+
+type MatchResumesRow = z.infer<typeof matchRowSchema>;
+
+export type SearchApiResult = {
+  id: string;
+  file_name: string;
+  name: string;
+  skills: string[];
+  experience: string;
+  similarity: number;
+};
+
+function toSimilarityPercent(similarity: number) {
+  if (!Number.isFinite(similarity)) {
+    return 0;
   }
 
-  const queryTokens = normalizedQuery.split(/\s+/);
-  const candidateTokens = candidateText.toLowerCase().split(/\s+/);
-  const overlapping = queryTokens.filter((token) => candidateTokens.includes(token)).length;
-
-  return Math.min(99, Math.max(40, Math.round((overlapping / Math.max(queryTokens.length, 1)) * 100)));
+  return Math.max(0, Math.min(100, Math.round(similarity * 100)));
 }
 
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const query = searchParams.get("q") ?? "React dev with fintech experience";
-
+export async function POST(request: Request) {
+  let parsedBody: unknown;
   try {
-    // Scoped to the authenticated user via RLS; unauthenticated requests fall back to demo results.
-    const supabase = createServerSupabaseClient();
-    const {
-      data: { user }
-    } = await supabase.auth.getUser();
-
-    if (user) {
-      const { data, error } = await supabase
-        .from("resumes")
-        .select("file_name, extracted_text")
-        .eq("user_id", user.id)
-        .order("created_at", { ascending: false });
-
-      if (!error && data && data.length > 0) {
-        const results = data
-          .map((row) => ({
-            name: row.file_name.replace(/\.pdf$/i, ""),
-            role: row.extracted_text || "Resume profile",
-            score: calculateScore(query, `${row.file_name} ${row.extracted_text ?? ""}`)
-          }))
-          .sort((left, right) => right.score - left.score)
-          .slice(0, 10);
-
-        return NextResponse.json({ results });
-      }
-    }
+    parsedBody = await request.json();
   } catch {
-    // Fall back to static demo results if Supabase is unavailable.
+    return NextResponse.json({ error: "Request body must be valid JSON with a query field." }, { status: 400 });
   }
 
-  const demoResults = fallbackResults.map((item, index) => ({
-    ...item,
-    score: index === 0 ? 96 : item.score
-  }));
+  const parsed = searchBodySchema.safeParse(parsedBody);
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Enter a search query." }, { status: 400 });
+  }
 
-  return NextResponse.json({ results: demoResults });
+  const supabase = createServerSupabaseClient();
+  const {
+    data: { user }
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return NextResponse.json({ error: "Sign in to search resumes." }, { status: 401 });
+  }
+
+  let queryEmbedding: number[];
+  try {
+    queryEmbedding = await createResumeEmbedding(parsed.data.query);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to create a search embedding.";
+    const status = message.includes("OPENAI_API_KEY") ? 500 : 502;
+    return NextResponse.json({ error: message }, { status });
+  }
+
+  let matches: MatchResumesRow[];
+  try {
+    const { data, error } = await supabase.rpc("match_resumes", {
+      query_embedding: toVectorLiteral(queryEmbedding),
+      match_count: MAX_RESULTS
+    });
+
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    const parsedMatches = matchRowsSchema.safeParse(data);
+    if (!parsedMatches.success) {
+      return NextResponse.json({ error: "Search returned an unexpected result shape." }, { status: 500 });
+    }
+
+    matches = parsedMatches.data;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to search resumes.";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+
+  const results: SearchApiResult[] = matches.slice(0, MAX_RESULTS).map((row) => {
+    const profile = extractCandidateProfile(row.extracted_text ?? "", row.file_name);
+
+    return {
+      id: row.id,
+      file_name: row.file_name,
+      name: profile.name,
+      skills: profile.skills,
+      experience: profile.experience,
+      similarity: toSimilarityPercent(row.similarity)
+    };
+  });
+
+  return NextResponse.json({ results });
 }
+
