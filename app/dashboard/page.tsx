@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { ArrowUpRight, CheckCircle2, FileText, Loader2, Search, Sparkles, UploadCloud, XCircle } from "lucide-react";
+import { ArrowUpRight, CheckCircle2, FileText, Loader2, Search, Sparkles, Trash2, UploadCloud, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { resumeToCandidate } from "@/lib/resume-profile";
@@ -47,6 +47,7 @@ export default function DashboardPage() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingCandidates, setLoadingCandidates] = useState(true);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
     const loadCandidates = async () => {
@@ -264,6 +265,43 @@ export default function DashboardPage() {
     router.push(`/search?q=${encodeURIComponent(nextQuery)}`);
   };
 
+  const handleDelete = async (id: number | string, name: string) => {
+    if (deletingId !== null || uploading) {
+      return;
+    }
+
+    const confirmed = window.confirm(`Delete "${name}"? This removes the PDF and its database record.`);
+    if (!confirmed) {
+      return;
+    }
+
+    const candidateId = String(id);
+    setDeletingId(candidateId);
+    setSuccessMessage(null);
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/resumes/${encodeURIComponent(candidateId)}`, { method: "DELETE" });
+      const json = (await response.json().catch(() => null)) as { error?: string } | null;
+
+      if (response.status === 401) {
+        router.push("/login");
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(json?.error ?? "Unable to delete this resume.");
+      }
+
+      setCandidates((current) => current.filter((candidate) => String(candidate.id) !== candidateId));
+      setSuccessMessage(`Deleted "${name}". You can upload another resume within your 500 limit.`);
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Unable to delete this resume.");
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   return (
     <main className="min-h-screen px-6 py-8">
       <div className="mx-auto max-w-7xl">
@@ -472,12 +510,13 @@ export default function DashboardPage() {
                   <th className="px-6 py-4">Skills</th>
                   <th className="px-6 py-4">Experience</th>
                   <th className="px-6 py-4">Upload date</th>
+                  <th className="px-6 py-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {loadingCandidates ? (
                   <tr>
-                    <td colSpan={4} className="px-6 py-10 text-center text-sm text-slate-400">
+                    <td colSpan={5} className="px-6 py-10 text-center text-sm text-slate-400">
                       <span className="inline-flex items-center gap-2">
                         <Loader2 className="h-4 w-4 animate-spin" /> Loading your resumes…
                       </span>
@@ -485,27 +524,49 @@ export default function DashboardPage() {
                   </tr>
                 ) : filteredCandidates.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="px-6 py-10 text-center text-sm text-slate-400">
+                    <td colSpan={5} className="px-6 py-10 text-center text-sm text-slate-400">
                       No resumes yet. Drop PDFs above to store them in your private Supabase folder.
                     </td>
                   </tr>
                 ) : (
-                  filteredCandidates.map((candidate) => (
-                    <tr key={String(candidate.id)} className="border-t border-slate-800 text-sm text-slate-200">
-                      <td className="px-6 py-4 font-medium text-white">{candidate.name}</td>
-                      <td className="px-6 py-4">
-                        <div className="flex flex-wrap gap-2">
-                          {(candidate.skills.length > 0 ? candidate.skills : ["Not specified"]).map((skill) => (
-                            <span key={`${candidate.id}-${skill}`} className="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300">
-                              {skill}
-                            </span>
-                          ))}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">{candidate.experience}</td>
-                      <td className="px-6 py-4 text-slate-400">{candidate.uploadedAt}</td>
-                    </tr>
-                  ))
+                  filteredCandidates.map((candidate) => {
+                    const isDeleting = deletingId === String(candidate.id);
+                    return (
+                      <tr key={String(candidate.id)} className="border-t border-slate-800 text-sm text-slate-200">
+                        <td className="px-6 py-4 font-medium text-white">{candidate.name}</td>
+                        <td className="px-6 py-4">
+                          <div className="flex flex-wrap gap-2">
+                            {(candidate.skills.length > 0 ? candidate.skills : ["Not specified"]).map((skill) => (
+                              <span
+                                key={`${candidate.id}-${skill}`}
+                                className="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300"
+                              >
+                                {skill}
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+                        <td className="px-6 py-4">{candidate.experience}</td>
+                        <td className="px-6 py-4 text-slate-400">{candidate.uploadedAt}</td>
+                        <td className="px-6 py-4 text-right">
+                          <button
+                            type="button"
+                            onClick={() => void handleDelete(candidate.id, candidate.name)}
+                            disabled={isDeleting || uploading}
+                            aria-label={`Delete ${candidate.name}`}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/10 px-2.5 py-1.5 text-xs text-rose-200 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {isDeleting ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-3.5 w-3.5" />
+                            )}
+                            {isDeleting ? "Deleting…" : "Delete"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
