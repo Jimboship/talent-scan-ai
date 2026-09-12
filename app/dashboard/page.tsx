@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { ArrowUpRight, FileText, Search, Sparkles, UploadCloud } from "lucide-react";
+import { ArrowUpRight, CheckCircle2, FileText, Loader2, Search, Sparkles, UploadCloud, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { resumeToCandidate } from "@/lib/resume-profile";
@@ -15,6 +15,20 @@ type Candidate = {
   uploadedAt: string;
 };
 
+type UploadItemStatus = "queued" | "uploading" | "success" | "error";
+
+type UploadItem = {
+  key: string;
+  fileName: string;
+  size: number;
+  status: UploadItemStatus;
+  message: string | null;
+};
+
+const MAX_RESUMES = 500;
+const MAX_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_FILES_PER_REQUEST = 10;
+
 const searchSuggestions = [
   "React dev with fintech experience",
   "Backend engineer for payments",
@@ -23,18 +37,34 @@ const searchSuggestions = [
 
 export default function DashboardPage() {
   const router = useRouter();
-  const supabase = createClient();
+  const [supabase] = useState(() => createClient());
 
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [query, setQuery] = useState("Search candidates like: React dev with fintech experience");
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadingCandidates, setLoadingCandidates] = useState(true);
 
   useEffect(() => {
     const loadCandidates = async () => {
       try {
-        const { data, error: fetchError } = await supabase.from("resumes").select("*").order("created_at", { ascending: false });
+        const {
+          data: { user }
+        } = await supabase.auth.getUser();
+
+        if (!user) {
+          router.push("/login");
+          return;
+        }
+
+        const { data, error: fetchError } = await supabase
+          .from("resumes")
+          .select("id, file_name, storage_path, extracted_text, created_at")
+          .eq("user_id", user.id)
+          .order("created_at", { ascending: false });
 
         if (fetchError) {
           setError(fetchError.message);
@@ -43,12 +73,14 @@ export default function DashboardPage() {
 
         setCandidates((data ?? []).map(resumeToCandidate));
       } catch {
-        // Ignore missing Supabase setup or empty table.
+        setError("Unable to load your resumes. Check your Supabase connection and try again.");
+      } finally {
+        setLoadingCandidates(false);
       }
     };
 
     void loadCandidates();
-  }, [supabase]);
+  }, [supabase, router]);
 
   const filteredCandidates = useMemo(() => {
     const input = query.toLowerCase();
@@ -67,31 +99,72 @@ export default function DashboardPage() {
       return;
     }
 
-    const pdfs = Array.from(files).filter(
-      (file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")
-    );
+    if (uploading) {
+      return;
+    }
+
+    const allFiles = Array.from(files);
+    const pdfs = allFiles.filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
+    const oversized = allFiles.filter((file) => (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) && file.size > MAX_FILE_BYTES);
 
     if (pdfs.length === 0) {
       setError("Please upload PDF files only.");
       return;
     }
 
-    const remaining = Math.max(500 - candidates.length, 0);
+    const remaining = Math.max(MAX_RESUMES - candidates.length, 0);
     if (remaining === 0) {
       setError("You have reached the 500 resume limit.");
       return;
     }
 
-    const incoming = pdfs.slice(0, remaining);
+    const incomingAll = pdfs.slice(0, remaining);
+    const incoming = incomingAll.filter((file) => file.size <= MAX_FILE_BYTES);
+    const skippedOversized = incomingAll.length - incoming.length;
+    const initialItems: UploadItem[] = incoming.map((file, index) => ({
+      key: `${Date.now()}-${index}-${file.name}`,
+      fileName: file.name,
+      size: file.size,
+      status: "queued" as UploadItemStatus,
+      message: "Waiting to upload…"
+    }));
+
+    if (incoming.length === 0) {
+      setUploadItems([]);
+      setError(
+        oversized.length > 0
+          ? `${oversized.map((file) => file.name).join(", ")} ${oversized.length === 1 ? "is" : "are"} larger than 10MB.`
+          : "No valid PDF files to upload."
+      );
+      return;
+    }
+
+    setUploadItems(initialItems);
     setUploading(true);
+    setSuccessMessage(null);
     setError(null);
 
     try {
       const uploadedCandidates: Candidate[] = [];
-      const warnings: string[] = [];
+      const warnings: string[] = [
+        ...oversized.map((file) => `${file.name} is larger than 10MB.`),
+        ...(skippedOversized > 0 ? [`${skippedOversized} file(s) were skipped because they exceed 10MB.`] : [])
+      ];
 
-      for (let index = 0; index < incoming.length; index += 10) {
-        const batch = incoming.slice(index, index + 10);
+      const validFiles = incoming;
+
+      for (let index = 0; index < validFiles.length; index += MAX_FILES_PER_REQUEST) {
+        const batch = validFiles.slice(index, index + MAX_FILES_PER_REQUEST);
+        const batchStart = index;
+
+        setUploadItems((current) =>
+          current.map((item, itemIndex) =>
+            itemIndex >= batchStart && itemIndex < batchStart + batch.length && item.status === "queued"
+              ? { ...item, status: "uploading", message: "Uploading to Supabase Storage…" }
+              : item
+          )
+        );
+
         const formData = new FormData();
         for (const file of batch) {
           formData.append("files", file);
@@ -103,6 +176,7 @@ export default function DashboardPage() {
         });
         const json = (await response.json()) as {
           candidates?: Candidate[];
+          results?: { fileName: string; candidate: Candidate | null; error: string | null }[];
           error?: string;
           errors?: string[];
         };
@@ -113,8 +187,45 @@ export default function DashboardPage() {
         }
 
         if (!response.ok) {
-          throw new Error(json.error ?? "Unable to upload resumes.");
+          const message = json.error ?? "Unable to upload resumes.";
+          setUploadItems((current) =>
+            current.map((item, itemIndex) =>
+              itemIndex >= batchStart && itemIndex < batchStart + batch.length && item.status === "uploading"
+                ? { ...item, status: "error", message }
+                : item
+            )
+          );
+          throw new Error(message);
         }
+
+        const resultByName = new Map((json.results ?? []).map((result) => [result.fileName, result]));
+        const succeededCount = (json.candidates ?? []).length;
+        const errorsInOrder = json.errors ?? [];
+        setUploadItems((current) =>
+          current.map((item, itemIndex) => {
+            if (itemIndex < batchStart || itemIndex >= batchStart + batch.length || item.status !== "uploading") {
+              return item;
+            }
+            const orderIndex = itemIndex - batchStart;
+            const fileName = batch[orderIndex]?.name ?? item.fileName;
+            const perFile = resultByName.get(fileName);
+            if (perFile?.candidate) {
+              return { ...item, status: "success", message: "Uploaded and saved." };
+            }
+            if (perFile?.error) {
+              return { ...item, status: "error", message: perFile.error };
+            }
+            // Fall back to positional matching when the server only returns candidates/errors.
+            if (orderIndex < succeededCount && errorsInOrder.length === 0) {
+              return { ...item, status: "success", message: "Uploaded and saved." };
+            }
+            return {
+              ...item,
+              status: "error",
+              message: errorsInOrder[orderIndex] ?? errorsInOrder[0] ?? "Upload failed."
+            };
+          })
+        );
 
         uploadedCandidates.push(...(json.candidates ?? []));
         if (json.errors?.length) {
@@ -122,15 +233,21 @@ export default function DashboardPage() {
         }
       }
 
-      setCandidates((current) => [...uploadedCandidates, ...current].slice(0, 500));
+      setCandidates((current) => [...uploadedCandidates, ...current].slice(0, MAX_RESUMES));
 
-      const skippedNonPdf = files.length - pdfs.length;
-      const skippedLimit = pdfs.length - incoming.length;
-      const extra = [
+      const skippedNonPdf = allFiles.length - pdfs.length;
+      const skippedLimit = pdfs.length - incomingAll.length;
+      const extra: string[] = [
         skippedNonPdf > 0 ? `${skippedNonPdf} non-PDF file(s) were ignored.` : null,
         skippedLimit > 0 ? `${skippedLimit} file(s) were skipped because of the 500 resume limit.` : null,
         ...warnings
-      ].filter(Boolean);
+      ].filter((value): value is string => value !== null);
+
+      if (uploadedCandidates.length > 0) {
+        setSuccessMessage(
+          `Uploaded ${uploadedCandidates.length} resume${uploadedCandidates.length === 1 ? "" : "s"} to Supabase Storage.`
+        );
+      }
 
       if (extra.length > 0) {
         setError(extra.join(" "));
@@ -246,14 +363,84 @@ export default function DashboardPage() {
 
             <div className="flex flex-col items-center justify-center text-center">
               <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary-500/10 text-primary-100">
-                <UploadCloud className="h-7 w-7" />
+                {uploading ? <Loader2 className="h-7 w-7 animate-spin" /> : <UploadCloud className="h-7 w-7" />}
               </div>
               <h2 className="mt-5 text-2xl font-semibold text-white">Drop your PDFs here</h2>
               <p className="mt-2 text-slate-300">
-                {uploading ? "Uploading and indexing resumes..." : "Upload up to 500 resumes to Supabase Storage and start searching right away."}
+                {uploading
+                  ? "Uploading resumes to Supabase Storage…"
+                  : "Upload up to 500 PDF resumes (max 10MB each) to Supabase Storage."}
+              </p>
+              <p className="mt-2 text-xs uppercase tracking-[0.18em] text-slate-500">
+                Drag and drop or click to browse • PDF only • multiple files supported
               </p>
             </div>
           </div>
+
+          {uploadItems.length > 0 ? (
+            <div className="card-surface mt-4 overflow-hidden">
+              <div className="flex items-center justify-between border-b border-slate-800 px-5 py-3">
+                <p className="text-sm font-medium text-white">
+                  Upload progress ({uploadItems.filter((item) => item.status === "success").length}/{uploadItems.length})
+                </p>
+                {uploading ? (
+                  <p className="inline-flex items-center gap-2 text-xs text-slate-400">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Uploading…
+                  </p>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setUploadItems([])}
+                    className="text-xs text-slate-400 transition hover:text-slate-200"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              <ul className="max-h-64 divide-y divide-slate-800 overflow-y-auto">
+                {uploadItems.map((item) => (
+                  <li key={item.key} className="flex items-start gap-3 px-5 py-3 text-sm">
+                    <span className="mt-0.5 text-slate-400">
+                      {item.status === "success" ? (
+                        <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                      ) : item.status === "error" ? (
+                        <XCircle className="h-4 w-4 text-rose-400" />
+                      ) : item.status === "uploading" ? (
+                        <Loader2 className="h-4 w-4 animate-spin text-primary-100" />
+                      ) : (
+                        <FileText className="h-4 w-4" />
+                      )}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-medium text-slate-100">{item.fileName}</span>
+                      <span
+                        className={
+                          item.status === "success"
+                            ? "text-emerald-300"
+                            : item.status === "error"
+                              ? "text-rose-300"
+                              : "text-slate-400"
+                        }
+                      >
+                        {item.status === "queued"
+                          ? `Queued • ${(item.size / 1024 / 1024).toFixed(2)} MB`
+                          : (item.message ?? item.status)}
+                      </span>
+                    </span>
+                    <span className="rounded-full border border-slate-700 px-2 py-1 text-[11px] uppercase tracking-wider text-slate-400">
+                      {item.status}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {successMessage ? (
+            <div className="mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+              {successMessage}
+            </div>
+          ) : null}
 
           {error ? (
             <div className="mt-4 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
@@ -288,10 +475,18 @@ export default function DashboardPage() {
                 </tr>
               </thead>
               <tbody>
-                {filteredCandidates.length === 0 ? (
+                {loadingCandidates ? (
                   <tr>
                     <td colSpan={4} className="px-6 py-10 text-center text-sm text-slate-400">
-                      No resumes yet. Drop PDFs above to extract name, skills, and experience.
+                      <span className="inline-flex items-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin" /> Loading your resumes…
+                      </span>
+                    </td>
+                  </tr>
+                ) : filteredCandidates.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="px-6 py-10 text-center text-sm text-slate-400">
+                      No resumes yet. Drop PDFs above to store them in your private Supabase folder.
                     </td>
                   </tr>
                 ) : (

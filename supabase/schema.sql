@@ -8,12 +8,16 @@ create extension if not exists vector;
 -- ---------------------------------------------------------------------------
 create table if not exists public.resumes (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid not null,
+  user_id uuid not null references auth.users (id) on delete cascade,
   file_name text not null,
+  storage_path text,
   extracted_text text,
   embedding vector(1536),
   created_at timestamptz not null default now()
 );
+
+-- Backfill for projects created before storage_path existed.
+alter table public.resumes add column if not exists storage_path text;
 
 do $$
 begin

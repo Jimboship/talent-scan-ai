@@ -1,5 +1,6 @@
-import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
+
+import { createServerSupabaseClient } from "@/lib/supabase-server";
 
 const fallbackResults = [
   { name: "Aisha Carter", score: 96, role: "Senior React Engineer" },
@@ -32,19 +33,19 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get("q") ?? "React dev with fintech experience";
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  try {
+    // Scoped to the authenticated user via RLS; unauthenticated requests fall back to demo results.
+    const supabase = createServerSupabaseClient();
+    const {
+      data: { user }
+    } = await supabase.auth.getUser();
 
-  if (supabaseUrl && serviceRoleKey) {
-    try {
-      const supabase = createClient(supabaseUrl, serviceRoleKey, {
-        auth: {
-          persistSession: false,
-          autoRefreshToken: false
-        }
-      });
-
-      const { data, error } = await supabase.from("resumes").select("*").order("created_at", { ascending: false });
+    if (user) {
+      const { data, error } = await supabase
+        .from("resumes")
+        .select("file_name, extracted_text")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false });
 
       if (!error && data && data.length > 0) {
         const results = data
@@ -58,9 +59,9 @@ export async function GET(request: Request) {
 
         return NextResponse.json({ results });
       }
-    } catch {
-      // Fall back to static demo results if Supabase is unavailable.
     }
+  } catch {
+    // Fall back to static demo results if Supabase is unavailable.
   }
 
   const demoResults = fallbackResults.map((item, index) => ({
