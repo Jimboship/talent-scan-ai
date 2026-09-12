@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { createResumeEmbedding, toVectorLiteral } from "@/lib/embeddings";
 import { extractPdfText } from "@/lib/pdf-text";
 import { resumeToCandidate } from "@/lib/resume-profile";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
@@ -93,14 +94,28 @@ export async function POST(request: Request) {
 
       const bytes = new Uint8Array(await file.arrayBuffer());
 
-      // Best-effort text extraction: storage must succeed even if a PDF is scanned/image-only.
-      // Embeddings are intentionally deferred (stored as null) until semantic search is implemented.
+      // 1) Extract text from the PDF (required for embeddings).
       let extractedText: string | null = null;
       try {
         const text = await extractPdfText(bytes);
         extractedText = text && text.trim().length > 0 ? text : null;
       } catch {
         extractedText = null;
+      }
+
+      if (!extractedText) {
+        throw new Error(`${file.name} has no readable text to index.`);
+      }
+
+      // 2) Generate an OpenAI embedding before touching Storage so a
+      // misconfigured OPENAI_API_KEY fails fast without orphaned files.
+      let embeddingLiteral: string;
+      try {
+        const embedding = await createResumeEmbedding(extractedText);
+        embeddingLiteral = toVectorLiteral(embedding);
+      } catch (embeddingError) {
+        const detail = embeddingError instanceof Error ? embeddingError.message : "embedding failed.";
+        throw new Error(`${file.name}: ${detail}`);
       }
 
       const safeName = normalizedName.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-").slice(0, 180) || "resume.pdf";
@@ -124,7 +139,7 @@ export async function POST(request: Request) {
           file_name: normalizedName,
           storage_path: filePath,
           extracted_text: extractedText,
-          embedding: null
+          embedding: embeddingLiteral
         })
         .select("id, file_name, storage_path, extracted_text, created_at")
         .single();

@@ -1,4 +1,4 @@
-import { createServerClient } from "@supabase/ssr";
+import { createServerClient, type CookieMethodsServer } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 const protectedPrefixes = ["/dashboard", "/search"];
@@ -18,7 +18,8 @@ export async function middleware(request: NextRequest) {
       getAll() {
         return request.cookies.getAll();
       },
-      setAll(cookiesToSet) {
+      setAll(...args: Parameters<NonNullable<CookieMethodsServer["setAll"]>>) {
+        const [cookiesToSet] = args;
         cookiesToSet.forEach(({ name, value }) => {
           request.cookies.set(name, value);
         });
