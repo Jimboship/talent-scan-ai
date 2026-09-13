@@ -1,19 +1,24 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { ArrowUpRight, CheckCircle2, FileText, Loader2, Search, Sparkles, Trash2, UploadCloud, XCircle } from "lucide-react";
+import { ArrowUpRight, CheckCircle2, Eye, FileText, Loader2, Search, Sparkles, Trash2, UploadCloud, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { resumeToCandidate } from "@/lib/resume-profile";
 import { createClient } from "@/lib/supabase";
+import {
+  DATE_OPTIONS,
+  EXPERIENCE_OPTIONS,
+  SORT_OPTIONS,
+  filterCandidates,
+  getAvailableSkills,
+  sortCandidates,
+  type CandidateSort,
+  type DateFilter,
+  type ExperienceFilter
+} from "@/lib/candidate-filters";
 
-type Candidate = {
-  id: number | string;
-  name: string;
-  skills: string[];
-  experience: string;
-  uploadedAt: string;
-};
+type Candidate = ReturnType<typeof resumeToCandidate>;
 
 type UploadItemStatus = "queued" | "uploading" | "success" | "error";
 
@@ -40,7 +45,7 @@ export default function DashboardPage() {
   const [supabase] = useState(() => createClient());
 
   const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [query, setQuery] = useState("Search candidates like: React dev with fintech experience");
+  const [query, setQuery] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
@@ -48,6 +53,10 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [loadingCandidates, setLoadingCandidates] = useState(true);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [skillFilter, setSkillFilter] = useState("all");
+  const [experienceFilter, setExperienceFilter] = useState<ExperienceFilter>("any");
+  const [dateFilter, setDateFilter] = useState<DateFilter>("all");
+  const [sort, setSort] = useState<CandidateSort>("newest");
 
   useEffect(() => {
     const loadCandidates = async () => {
@@ -83,10 +92,10 @@ export default function DashboardPage() {
     void loadCandidates();
   }, [supabase, router]);
 
-  const filteredCandidates = useMemo(() => {
-    const input = query.toLowerCase();
+  const textFiltered = useMemo(() => {
+    const input = query.trim().toLowerCase();
 
-    if (!input || input.startsWith("search candidates like:")) {
+    if (!input) {
       return candidates;
     }
 
@@ -94,6 +103,19 @@ export default function DashboardPage() {
       [candidate.name, candidate.skills.join(" "), candidate.experience].join(" ").toLowerCase().includes(input)
     );
   }, [candidates, query]);
+
+  const availableSkills = useMemo(() => getAvailableSkills(candidates), [candidates]);
+
+  const filteredCandidates = useMemo(() => {
+    const filtered = filterCandidates(textFiltered, {
+      skill: skillFilter,
+      experience: experienceFilter,
+      date: dateFilter
+    });
+    return sortCandidates(filtered, sort);
+  }, [textFiltered, skillFilter, experienceFilter, dateFilter, sort]);
+
+  const filtersActive = skillFilter !== "all" || experienceFilter !== "any" || dateFilter !== "all";
 
   const onFilesAdded = async (files: FileList | null) => {
     if (!files || files.length === 0) {
@@ -261,11 +283,10 @@ export default function DashboardPage() {
   };
 
   const handleSearch = () => {
-    const nextQuery = query.startsWith("Search candidates like:") ? query.replace("Search candidates like: ", "") : query;
-    router.push(`/search?q=${encodeURIComponent(nextQuery)}`);
+    router.push(`/search?q=${encodeURIComponent(query.trim())}`);
   };
 
-  const handleDelete = async (id: number | string, name: string) => {
+  const handleDelete = async (id: string, name: string) => {
     if (deletingId !== null || uploading) {
       return;
     }
@@ -502,6 +523,84 @@ export default function DashboardPage() {
             </button>
           </div>
 
+          <div className="grid gap-3 border-b border-slate-800 px-6 py-4 sm:grid-cols-2 lg:grid-cols-4">
+            <label className="block">
+              <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-500">Skill</span>
+              <select
+                value={skillFilter}
+                onChange={(event) => setSkillFilter(event.target.value)}
+                className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200"
+              >
+                <option value="all">All skills</option>
+                {availableSkills.map((skill) => (
+                  <option key={skill} value={skill}>
+                    {skill}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-500">Experience</span>
+              <select
+                value={experienceFilter}
+                onChange={(event) => setExperienceFilter(event.target.value as ExperienceFilter)}
+                className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200"
+              >
+                {EXPERIENCE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-500">Uploaded</span>
+              <select
+                value={dateFilter}
+                onChange={(event) => setDateFilter(event.target.value as DateFilter)}
+                className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200"
+              >
+                {DATE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-500">Sort</span>
+              <select
+                value={sort}
+                onChange={(event) => setSort(event.target.value as CandidateSort)}
+                className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200"
+              >
+                {SORT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {filtersActive ? (
+            <div className="flex items-center justify-between border-b border-slate-800 px-6 py-2 text-xs text-slate-400">
+              <span>
+                Showing {filteredCandidates.length} of {candidates.length} candidates
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setSkillFilter("all");
+                  setExperienceFilter("any");
+                  setDateFilter("all");
+                }}
+                className="text-primary-200 transition hover:text-white"
+              >
+                Clear filters
+              </button>
+            </div>
+          ) : null}
+
           <div className="overflow-x-auto">
             <table className="min-w-full text-left">
               <thead className="bg-slate-950/60 text-xs uppercase tracking-[0.14em] text-slate-400">
@@ -525,7 +624,9 @@ export default function DashboardPage() {
                 ) : filteredCandidates.length === 0 ? (
                   <tr>
                     <td colSpan={5} className="px-6 py-10 text-center text-sm text-slate-400">
-                      No resumes yet. Drop PDFs above to store them in your private Supabase folder.
+                      {candidates.length === 0
+                        ? "No resumes yet. Drop PDFs above to store them in your private Supabase folder."
+                        : "No candidates match these filters. Clear filters or adjust your search."}
                     </td>
                   </tr>
                 ) : (
@@ -533,7 +634,15 @@ export default function DashboardPage() {
                     const isDeleting = deletingId === String(candidate.id);
                     return (
                       <tr key={String(candidate.id)} className="border-t border-slate-800 text-sm text-slate-200">
-                        <td className="px-6 py-4 font-medium text-white">{candidate.name}</td>
+                        <td className="px-6 py-4 font-medium text-white">
+                          <button
+                            type="button"
+                            onClick={() => router.push(`/dashboard/resumes/${encodeURIComponent(String(candidate.id))}`)}
+                            className="transition hover:text-primary-200 hover:underline"
+                          >
+                            {candidate.name}
+                          </button>
+                        </td>
                         <td className="px-6 py-4">
                           <div className="flex flex-wrap gap-2">
                             {(candidate.skills.length > 0 ? candidate.skills : ["Not specified"]).map((skill) => (
@@ -549,20 +658,30 @@ export default function DashboardPage() {
                         <td className="px-6 py-4">{candidate.experience}</td>
                         <td className="px-6 py-4 text-slate-400">{candidate.uploadedAt}</td>
                         <td className="px-6 py-4 text-right">
-                          <button
-                            type="button"
-                            onClick={() => void handleDelete(candidate.id, candidate.name)}
-                            disabled={isDeleting || uploading}
-                            aria-label={`Delete ${candidate.name}`}
-                            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/10 px-2.5 py-1.5 text-xs text-rose-200 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            {isDeleting ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            ) : (
-                              <Trash2 className="h-3.5 w-3.5" />
-                            )}
-                            {isDeleting ? "Deleting…" : "Delete"}
-                          </button>
+                          <div className="inline-flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => router.push(`/dashboard/resumes/${encodeURIComponent(String(candidate.id))}`)}
+                              aria-label={`View ${candidate.name}`}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-200 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              <Eye className="h-3.5 w-3.5" /> View
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleDelete(candidate.id, candidate.name)}
+                              disabled={isDeleting || uploading}
+                              aria-label={`Delete ${candidate.name}`}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/10 px-2.5 py-1.5 text-xs text-rose-200 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {isDeleting ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-3.5 w-3.5" />
+                              )}
+                              {isDeleting ? "Deleting…" : "Delete"}
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );

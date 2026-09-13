@@ -141,6 +141,9 @@ export function resumeToCandidate(row: Pick<ResumeRow, "id" | "file_name" | "ext
     name: profile.name,
     skills: profile.skills,
     experience: profile.experience,
+    fileName: row.file_name,
+    extractedText: row.extracted_text ?? "",
+    createdAt: row.created_at,
     uploadedAt: new Date(row.created_at).toISOString().slice(0, 10)
   };
 }

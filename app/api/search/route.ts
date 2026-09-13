@@ -32,6 +32,8 @@ export type SearchApiResult = {
   name: string;
   skills: string[];
   experience: string;
+  created_at?: string;
+  createdAt?: string;
   similarity: number;
 };
 
@@ -105,6 +107,8 @@ export async function POST(request: Request) {
       name: profile.name,
       skills: profile.skills,
       experience: profile.experience,
+      created_at: row.created_at,
+      createdAt: row.created_at,
       similarity: toSimilarityPercent(row.similarity)
     };
   });
